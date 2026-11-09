@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { getTriplet } from "@/lib/dataset";
+import { CONDITION_INFO, getTriplet } from "@/lib/dataset";
 import { answeredMain, currentSlot, mainAnswer, newId, nowIso } from "@/lib/engine";
 import { SCREEN_LABELS } from "@/lib/content";
 import { transact } from "@/lib/store";
@@ -66,14 +66,16 @@ export function DemoInspector({ p, state }: { p: Participant; state: DemoState }
         <Row k="PROLIFIC_PID" v={p.pid} />
         <Row k="STUDY / SESSION" v={`${p.studyId} / ${p.sessionId}`} />
         <Row k="画面" v={`${SCREEN_LABELS[p.stage]}（${p.stage}）`} />
-        <Row k="アクセス回数" v={`${p.accessCount} 回 / 離脱 ${p.dropouts.length} 回`} />
+        <Row k="アクセス回数" v={`${p.accessCount} 回 / 中断 ${p.dropouts.length} 回`} />
+        {p.stage === "practice" && <Row k="練習の画像" v="仮画像（ご用意いただく画像に差し替え予定）" />}
         {p.stage === "main" && (
           <>
             <Row k="進捗" v={`本試行 ${answeredMain(p)} / ${p.n} 問回答済み`} />
             <Row k="triplet_id" v={slot?.triplet_id} />
-            <Row k="種別・条件" v={slot?.kind === "attention" ? `注意力確認（正解: ${slot.target}）` : `本試行・条件 ${t?.condition}`} />
+            <Row k="種別・条件" v={slot?.kind === "attention" ? `注意力確認（正解: ${slot.target}）・仮画像` : `本試行・条件 ${t?.condition}（${t ? CONDITION_INFO[t.condition].label : ""}）`} />
             <Row k="A / B / C" v={t ? `${t.anchor_id} / ${t.b_id} / ${t.c_id}` : "—"} />
             <Row k="b_id の位置" v={slot?.b_side === "left" ? "左（B/C 入替なし）" : "右（B/C 入替）"} />
+            {t?.meta?.b_distance != null && <Row k="距離 B / C" v={`${t.meta.b_distance.toFixed(3)} / ${t.meta.c_distance?.toFixed(3)}（差 ${t.meta.distance_gap?.toFixed(3)}）`} />}
           </>
         )}
         <Row k="保存済み行数" v={`${rows.length} 行`} />

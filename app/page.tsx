@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { SiteHeader } from "@/components/SiteHeader";
 import { StartPanel } from "@/components/StartPanel";
-import { IconArrowRight, IconBook, IconFlask, IconGauge, IconShield, IconUsers } from "@/components/icons";
+import { IconArrowRight, IconBook, IconCheck, IconFlask, IconGauge, IconShield, IconUsers } from "@/components/icons";
 
 const FLOW = [
   ["同意・説明", "同意しない → 終了"],
@@ -21,9 +21,19 @@ const CHECKS: [string, string][] = [
   ["問題割当・均等化", "管理画面 › シミュレーション で参加者 1,000 人規模を即時検証。回答数の差は常に 1 以内"],
   ["同時アクセス", "複数タブで同時に開始、または仮想参加者を同時 30 人で実行。排他ロックで割当の競合なし"],
   ["離脱・再アクセス", "回答途中でブラウザの「戻る」やタブを閉じる → 未回答問題を即時解放 →「再アクセス」で続きから再開"],
+  ["中断と取消の区別", "画面上部の「Withdraw」で参加を取り消すと「取消」、離脱・通信切断は「中断」として、管理画面・CSV で区別して記録"],
   ["保存データと CSV の一致", "管理画面 › CSV 出力 の整合性チェックで、回答行と集計値の一致を自動検証"],
   ["保存後の Prolific 遷移", "サーバー側で全回答の保存を検証してから完了画面 → 自動リダイレクト（デモは模擬画面）"],
   ["管理操作", "N の設定、完了 URL の変更、一時停止・再開、画像エラー確認、CSV 一括ダウンロード"],
+];
+
+
+const UPDATES: [string, string][] = [
+  ["実データを反映", "ご提供の問題 3,000 組・画像 9,000 枚・補助データ（JSON）を取り込み、本試行は実際の間取り図で出題しています。"],
+  ["画像の問題を自動で除外", "0 バイトの画像 832 枚（279 組）を取り込み時に検出し、出題対象から除外しています。一覧は管理画面から CSV で出力できます。"],
+  ["中断と取消を区別して記録", "通信切断・離脱は「中断」（再開可能）、不同意・理解度確認の不合格・本人による参加取消は「取消」として記録します。"],
+  ["CSV に補助データを追加", "本試行の CSV に、JSON の b_source / c_source・距離・順位・distance_gap を列として出力します。"],
+  ["ご回答の仕様を確定", "B・C は左＝B・右＝C で固定し中身を入れ替え、注意力確認は不正解でも続行、事後質問の重複選択肢は 1 つに統合。"],
 ];
 
 const LINKS = [
@@ -61,9 +71,36 @@ export default function Home() {
             <span className="block text-brand">Prolific 連携・回答数の自動均等化</span>
           </h1>
           <p className="mt-4 max-w-[760px] text-[16px] leading-relaxed text-ink-2">
-            画面遷移イメージ（v2）の全画面を実装し、3,000 組の問題からの自動割当、回答の逐次保存、離脱時の再割当、管理画面、CSV 出力までをそのまま操作できるデモです。
-            ご提供いただく実データ（CSV・画像）に差し替えるだけで本番運用に移行できる構成です。
+            画面遷移イメージ（v2）の全画面を実装し、ご提供いただいた実データ（問題 3,000 組・画像 9,000 枚）での自動割当、回答の逐次保存、中断時の再割当、管理画面、CSV 出力までをそのまま操作できるデモです。
           </p>
+        </section>
+
+        <section className="card mb-5 border-brand-100 p-6">
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <span className="pill bg-brand text-white">11/9 更新</span>
+            <h2 className="text-lg font-bold">ご回答・ご提供データを反映しました</h2>
+          </div>
+          <ul className="grid gap-x-8 gap-y-3 md:grid-cols-2">
+            {UPDATES.map(([t, d]) => (
+              <li key={t} className="flex gap-3">
+                <span className="mt-0.5 grid size-5 flex-none place-items-center rounded-full bg-good-50 text-good">
+                  <IconCheck size={12} />
+                </span>
+                <div>
+                  <p className="text-[15px] font-semibold">{t}</p>
+                  <p className="text-sm leading-relaxed text-ink-2">{d}</p>
+                </div>
+              </li>
+            ))}
+          </ul>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Link href="/admin?tab=data" className="btn btn-secondary btn-sm">
+              データの確認結果を見る
+            </Link>
+            <Link href="/docs#spec" className="btn btn-secondary btn-sm">
+              確定した仕様を見る
+            </Link>
+          </div>
         </section>
 
         <div className="grid gap-5 lg:grid-cols-[1.25fr_1fr]">
@@ -135,7 +172,7 @@ export default function Home() {
               データベースには接続せず、<b>フロントエンドだけで動作</b>します。割当・保存などの処理はブラウザ内の仮想バックエンドで実行し、回答は<b>このブラウザ内</b>に保存します（別の端末・ブラウザとは共有されません）。
             </li>
             <li>
-              間取り図はデモ用に自動生成した画像です（18 m × 18 m・黒=壁・白=室内・灰=屋外・玄関は下向き）。URL 構成は実データと同じ <code className="rounded bg-[#eef0f4] px-1 font-mono text-xs">{"RPLAN_triplets/{triplet_id}/a.png"}</code> です。
+              本試行の間取り図・問題データは、ご提供いただいた実データです（URL 構成も実データと同じ <code className="rounded bg-[#eef0f4] px-1 font-mono text-xs">{"RPLAN_triplets/{triplet_id}/a.png"}</code>）。練習・注意力確認・説明画面の例示は仮画像で、ご用意いただく画像に差し替えます。
             </li>
             <li>デモでは完了後、実在の Prolific ではなく模擬画面に遷移します（管理画面の設定で切替可能）。</li>
           </ul>

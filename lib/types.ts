@@ -6,6 +6,18 @@ export const CONDITION_WEIGHTS: Record<Condition, number> = { a: 2, b: 1, c: 1, 
 
 export type Pool = "main" | "practice" | "attention" | "example";
 
+export interface TripletMeta {
+  b_source: string | null;
+  c_source: string | null;
+  b_distance: number | null;
+  c_distance: number | null;
+  b_rank: number | null;
+  c_rank: number | null;
+  distance_gap: number | null;
+}
+
+export type FileStatus = "ok" | "empty" | "invalid" | "missing";
+
 export interface Triplet {
   triplet_id: string;
   anchor_id: string;
@@ -13,6 +25,11 @@ export interface Triplet {
   c_id: string;
   condition: Condition;
   pool: Pool;
+  /** 補助データ（triplets.json） */
+  meta?: TripletMeta;
+  /** 取り込み時の画像検査結果 [a, b, c] */
+  files?: [FileStatus, FileStatus, FileStatus];
+  sizes?: [number, number, number];
 }
 
 export type Side = "left" | "right";
@@ -40,7 +57,10 @@ export interface Settings {
   autoRedirectSeconds: number;
 }
 
-export type ParticipantStatus = "active" | "completed" | "dropped" | "declined" | "screened_out";
+export type ParticipantStatus = "active" | "completed" | "dropped" | "declined" | "screened_out" | "withdrawn";
+
+/** 終了の種類: 取消（明示的な終了）と 中断（通信切断・離脱）を区別して記録 */
+export type Termination = "completed" | "cancelled" | "interrupted" | "in_progress";
 
 export type Stage =
   | "consent"
@@ -101,6 +121,7 @@ export interface Participant {
   releasedIds: string[];
   dropouts: Dropout[];
   simulated?: boolean;
+  withdrawnAt?: string;
 }
 
 export type Phase = "consent" | "comprehension" | "practice" | "main" | "attention" | "post" | "demographic";
@@ -150,7 +171,7 @@ export interface ImageErrorLog {
 
 export interface EventLog {
   at: string;
-  type: "start" | "resume" | "allocate" | "release" | "complete" | "dropout" | "screen_out" | "decline" | "admin" | "reject";
+  type: "start" | "resume" | "allocate" | "release" | "complete" | "dropout" | "screen_out" | "decline" | "withdraw" | "admin" | "reject";
   pid?: string;
   message: string;
 }
@@ -162,7 +183,13 @@ export interface ImportReport {
   imagesExpected: number;
   imagesChecked: number;
   missing: { triplet_id: string; file: string }[];
+  /** 0 バイト（中身が空）のファイル */
+  empty: { triplet_id: string; file: string }[];
   corrupt: { triplet_id: string; file: string }[];
+  /** 画像に問題があり出題対象から除外した問題数 */
+  defectiveTriplets: number;
+  jsonRecords: number;
+  jsonMismatch: number;
   csvIssues: string[];
   byCondition: Record<Condition, number>;
   uniqueAnchors: number;
@@ -170,7 +197,7 @@ export interface ImportReport {
 }
 
 export interface DemoState {
-  schema: 3;
+  schema: 4;
   createdAt: string;
   settings: Settings;
   participants: Record<string, Participant>;

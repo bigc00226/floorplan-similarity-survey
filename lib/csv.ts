@@ -1,6 +1,6 @@
 import { DEMOGRAPHICS } from "./content";
-import { mainTriplets } from "./dataset";
-import { answeredMain, effectiveLoad } from "./engine";
+import { getTriplet, mainTriplets } from "./dataset";
+import { answeredMain, effectiveLoad, terminationOf, terminationReason } from "./engine";
 import type { DemoState, ResponseRow } from "./types";
 
 const esc = (v: unknown) => {
@@ -25,6 +25,13 @@ export const RESPONSE_COLUMNS: { key: keyof ResponseRow | string; desc: string }
   { key: "attempt", desc: "理解度確認の試行回数（1 or 2）" },
   { key: "triplet_id", desc: "問題ID" },
   { key: "condition", desc: "抽出条件 a〜g（triplet_id から自動判定）" },
+  { key: "b_source", desc: "補助データ（triplets.json）: B の抽出元（near / mid / far / random）" },
+  { key: "c_source", desc: "補助データ: C の抽出元" },
+  { key: "b_distance", desc: "補助データ: A と B の距離" },
+  { key: "c_distance", desc: "補助データ: A と C の距離" },
+  { key: "b_rank", desc: "補助データ: B の順位" },
+  { key: "c_rank", desc: "補助データ: C の順位" },
+  { key: "distance_gap", desc: "補助データ: 距離の差" },
   { key: "anchor_id", desc: "基準間取り A の画像ID" },
   { key: "b_id", desc: "比較対象 B の画像ID（CSV上の b_id）" },
   { key: "c_id", desc: "比較対象 C の画像ID（CSV上の c_id）" },
@@ -47,6 +54,7 @@ export const RESPONSE_COLUMNS: { key: keyof ResponseRow | string; desc: string }
 ];
 
 function responseRow(r: ResponseRow) {
+  const m = r.triplet_id ? getTriplet(r.triplet_id)?.meta : undefined;
   return [
     r.id,
     r.pid,
@@ -59,6 +67,13 @@ function responseRow(r: ResponseRow) {
     r.attempt,
     r.triplet_id,
     r.condition,
+    m?.b_source,
+    m?.c_source,
+    m?.b_distance,
+    m?.c_distance,
+    m?.b_rank,
+    m?.c_rank,
+    m?.distance_gap,
     r.anchor_id,
     r.b_id,
     r.c_id,
@@ -98,6 +113,9 @@ export function participantsCsv(s: DemoState) {
     "session_id",
     "all_session_ids",
     "status",
+    "termination_type",
+    "termination_reason",
+    "withdrawn_at",
     "last_stage",
     "consent",
     "comprehension_attempts",
@@ -140,6 +158,9 @@ export function participantsCsv(s: DemoState) {
       p.sessionId,
       p.sessionIds.join(";"),
       p.status,
+      terminationOf(p),
+      terminationReason(p),
+      p.withdrawnAt,
       p.stage,
       get("consent")?.response,
       p.comprehensionAttempts,
@@ -177,9 +198,41 @@ export function tripletStatusCsv(s: DemoState) {
   const ex = new Set(s.excluded);
   const rows = mainTriplets().map((t) => {
     const done = s.completedCounts[t.triplet_id] ?? 0;
-    return [t.triplet_id, t.condition, t.anchor_id, t.b_id, t.c_id, done, (load.get(t.triplet_id) ?? 0) - done, ex.has(t.triplet_id) ? "TRUE" : ""];
+    const m = t.meta;
+    const img = (t.files ?? []).map((st, i) => (st === "ok" ? "" : `${"abc"[i]}.png:${st}`)).filter(Boolean).join(";");
+    return [
+      t.triplet_id,
+      t.condition,
+      t.anchor_id,
+      t.b_id,
+      t.c_id,
+      m?.b_source,
+      m?.c_source,
+      m?.b_distance,
+      m?.c_distance,
+      m?.distance_gap,
+      done,
+      (load.get(t.triplet_id) ?? 0) - done,
+      ex.has(t.triplet_id) ? "TRUE" : "",
+      img,
+    ];
   });
-  return toCsv(["triplet_id", "condition", "anchor_id", "b_id", "c_id", "responses", "reserved", "excluded"], rows);
+  return toCsv(
+    ["triplet_id", "condition", "anchor_id", "b_id", "c_id", "b_source", "c_source", "b_distance", "c_distance", "distance_gap", "responses", "reserved", "excluded", "image_issue"],
+    rows,
+  );
+}
+
+/** 取り込み時に検出した画像不良の一覧（依頼者様への差し替え依頼用） */
+export function defectsCsv(list: { triplet_id: string; file: string; kind: string }[]) {
+  return toCsv(
+    ["triplet_id", "anchor_id", "condition", "file", "image_id", "issue"],
+    list.map((d) => {
+      const t = getTriplet(d.triplet_id)!;
+      const id = d.file === "a.png" ? t.anchor_id : d.file === "b.png" ? t.b_id : t.c_id;
+      return [d.triplet_id, t.anchor_id, t.condition, d.file, id, d.kind];
+    }),
+  );
 }
 
 export function download(filename: string, content: string, type = "text/csv;charset=utf-8") {

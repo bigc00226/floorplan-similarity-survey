@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { attentionPositions, conditionQuota } from "@/lib/allocator";
-import { RESPONSE_COLUMNS, download, participantsCsv, responsesCsv, stamp, tripletStatusCsv } from "@/lib/csv";
-import { defectList, imagePath, mainTriplets, parseCondition } from "@/lib/dataset";
+import { RESPONSE_COLUMNS, defectsCsv, download, participantsCsv, responsesCsv, stamp, tripletStatusCsv } from "@/lib/csv";
+import { CONDITION_INFO, getTriplet, imagePath, mainTriplets, parseCondition } from "@/lib/dataset";
 import { DEFAULT_SETTINGS, audit, initialImportReport, log, logImageError, nowIso } from "@/lib/engine";
 import { resetAll, transact } from "@/lib/store";
 import { CONDITIONS, CONDITION_WEIGHTS, type Condition, type DemoState, type ImportReport, type Settings } from "@/lib/types";
@@ -96,22 +96,14 @@ export function SettingsPanel({ s }: { s: DemoState }) {
               ))}
             </select>
           </Field>
-          <Field label="B・C のラベル表示" hint="左右の位置は常にランダム化され、実際の位置（b_side）を保存します。">
-            <div className="grid gap-2">
-              {(
-                [
-                  ["positional", "位置で固定（推奨）", "左に「B」、右に「C」を常に表示し、中身の b_id / c_id を入れ替えます。参加者が混乱しにくい方式です。"],
-                  ["follow", "画像に追従", "b_id の画像には常に「B」を表示します。その結果、右側に「B」が出ることがあります。"],
-                ] as const
-              ).map(([v, t, d]) => (
-                <label key={v} className={`flex cursor-pointer gap-3 rounded-xl border p-3 ${f.labelMode === v ? "border-brand bg-brand-50" : "border-line"}`}>
-                  <input type="radio" name="lm" className="mt-1" checked={f.labelMode === v} onChange={() => setF({ ...f, labelMode: v })} />
-                  <span>
-                    <span className="block text-sm font-semibold">{t}</span>
-                    <span className="block text-xs leading-relaxed text-muted">{d}</span>
-                  </span>
-                </label>
-              ))}
+          <Field label="B・C のラベル表示" hint="ご回答いただいた方式で確定しています。">
+            <div className="rounded-xl border border-[#bfe5cf] bg-good-50 p-3">
+              <p className="flex items-center gap-1.5 text-sm font-semibold text-good">
+                <IconCheck size={15} /> 左＝B・右＝C で固定し、中身の画像（b_id / c_id）の左右をランダムに入れ替え
+              </p>
+              <p className="mt-1 text-xs leading-relaxed text-ink-2">
+                各回答に、左右に表示した画像 ID（left_image_id / right_image_id）、b_id の表示位置（b_side）、選んだ画像 ID（selected_image_id）を記録し、記録上で整合が取れるようにしています。
+              </p>
             </div>
           </Field>
           <Field label="離脱判定のタイムアウト" hint="ブラウザを閉じた・戻る操作は即時に検知します。通信断・スリープなど即時検知できない場合に、この時間応答がなければ離脱とみなし未回答問題を解放します。">
@@ -249,11 +241,14 @@ function validateCsv(name: string, text: string): CsvReport {
   return { name, rows, header, errors, warnings, byCondition, anchors: anchors.size };
 }
 
-async function checkImage(url: string): Promise<"ok" | "missing" | "corrupt"> {
+type CheckResult = "ok" | "missing" | "empty" | "corrupt";
+
+async function checkImage(url: string): Promise<CheckResult> {
   try {
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) return "missing";
     const blob = await res.blob();
+    if (blob.size === 0) return "empty";
     const obj = URL.createObjectURL(blob);
     const ok = await new Promise<boolean>((resolve) => {
       const img = new Image();
@@ -268,45 +263,70 @@ async function checkImage(url: string): Promise<"ok" | "missing" | "corrupt"> {
   }
 }
 
+const KIND_JA: Record<string, string> = { missing: "欠損", empty: "0 バイト（空）", corrupt: "破損", invalid: "破損" };
+
 export function DataCheckPanel({ s }: { s: DemoState }) {
   const r = s.importReport ?? initialImportReport();
   const [running, setRunning] = useState<null | { done: number; total: number; bad: number }>(null);
   const [csv, setCsv] = useState<CsvReport | null>(null);
   const cancel = useRef(false);
-  const ex = new Set(s.excluded);
-  const defects = [...r.missing.map((d) => ({ ...d, kind: "欠損" })), ...r.corrupt.map((d) => ({ ...d, kind: "破損" }))];
+  const ex = useMemo(() => new Set(s.excluded), [s.excluded]);
+
+  const defects = useMemo(
+    () => [
+      ...r.missing.map((d) => ({ ...d, kind: "missing" })),
+      ...(r.empty ?? []).map((d) => ({ ...d, kind: "empty" })),
+      ...r.corrupt.map((d) => ({ ...d, kind: "corrupt" })),
+    ],
+    [r],
+  );
+  const byTriplet = useMemo(() => {
+    const m = new Map<string, { files: string[]; kind: string }>();
+    for (const d of defects) {
+      const cur = m.get(d.triplet_id) ?? { files: [], kind: d.kind };
+      cur.files.push(d.file.replace(".png", ""));
+      m.set(d.triplet_id, cur);
+    }
+    return [...m.entries()].sort((x, y) => x[0].localeCompare(y[0]));
+  }, [defects]);
+  const exByCond = useMemo(() => {
+    const c = Object.fromEntries(CONDITIONS.map((k) => [k, 0])) as Record<Condition, number>;
+    for (const t of mainTriplets()) if (ex.has(t.triplet_id)) c[t.condition]++;
+    return c;
+  }, [ex]);
 
   const run = async (mode: "sample" | "full") => {
     const all = mainTriplets();
     let targets = all;
     if (mode === "sample") {
-      const forced = new Set(defectList().map((d) => d.triplet_id));
+      const forced = new Set(byTriplet.slice(0, 12).map(([id]) => id));
       targets = all.filter((t, i) => i % 30 === 0 || forced.has(t.triplet_id));
     }
     const jobs = targets.flatMap((t) => (["a.png", "b.png", "c.png"] as const).map((f) => ({ t: t.triplet_id, f })));
-    const missing: ImportReport["missing"] = [];
-    const corrupt: ImportReport["corrupt"] = [];
+    const found: Record<Exclude<CheckResult, "ok">, { triplet_id: string; file: string }[]> = { missing: [], empty: [], corrupt: [] };
     cancel.current = false;
     let done = 0;
-    setRunning({ done: 0, total: jobs.length, bad: 0 });
     let next = 0;
+    setRunning({ done: 0, total: jobs.length, bad: 0 });
     const worker = async () => {
       while (next < jobs.length && !cancel.current) {
         const j = jobs[next++];
         const res = await checkImage(imagePath(j.t, j.f));
-        if (res === "missing") missing.push({ triplet_id: j.t, file: j.f });
-        if (res === "corrupt") corrupt.push({ triplet_id: j.t, file: j.f });
+        if (res !== "ok") found[res].push({ triplet_id: j.t, file: j.f });
         done++;
-        if (done % 25 === 0 || done === jobs.length) setRunning({ done, total: jobs.length, bad: missing.length + corrupt.length });
+        if (done % 30 === 0 || done === jobs.length) setRunning({ done, total: jobs.length, bad: found.missing.length + found.empty.length + found.corrupt.length });
       }
     };
     await Promise.all(Array.from({ length: 16 }, worker));
     const base = initialImportReport();
+    const badIds = new Set([...found.missing, ...found.empty, ...found.corrupt].map((d) => d.triplet_id));
     await transact((x) => {
-      x.importReport = { ...base, at: nowIso(), imagesChecked: done, missing, corrupt, mode };
-      for (const m of missing) logImageError(x, { triplet_id: m.triplet_id, file: m.file, source: "validation", detail: "ファイルが見つかりません（404）" });
-      for (const c of corrupt) logImageError(x, { triplet_id: c.triplet_id, file: c.file, source: "validation", detail: "画像として読み込めません（破損）" });
-      log(x, "admin", `画像検証（${mode === "full" ? "全数" : "サンプル"}）: ${done.toLocaleString()} 枚を確認、欠損 ${missing.length}・破損 ${corrupt.length}`);
+      x.importReport = { ...base, at: nowIso(), imagesChecked: done, missing: found.missing, empty: found.empty, corrupt: found.corrupt, defectiveTriplets: badIds.size, mode };
+      log(
+        x,
+        "admin",
+        `画像を再検証（${mode === "full" ? "全数" : "サンプル"}）: ${done.toLocaleString()} 枚を確認、0 バイト ${found.empty.length}・欠損 ${found.missing.length}・破損 ${found.corrupt.length}（${badIds.size} 組）`,
+      );
     });
     setRunning(null);
   };
@@ -318,102 +338,129 @@ export function DataCheckPanel({ s }: { s: DemoState }) {
     });
   const excludeAll = () =>
     transact((x) => {
-      x.excluded = Array.from(new Set([...x.excluded, ...defects.map((d) => d.triplet_id)]));
-      log(x, "admin", `画像不良の ${defects.length} 問を出題対象から除外しました`);
+      x.excluded = Array.from(new Set([...x.excluded, ...byTriplet.map(([id]) => id)]));
+      log(x, "admin", `画像不良の ${byTriplet.length} 組を出題対象から除外しました`);
     });
 
   const total = CONDITIONS.reduce((a, c) => a + CONDITION_WEIGHTS[c], 0);
+  const okImages = r.imagesExpected - defects.length;
 
   return (
     <div className="space-y-5">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Kpi label="問題データ（CSV 行数）" value={r.rows.toLocaleString()} sub={`重複なし ${r.uniqueTriplets.toLocaleString()} 件`} tone={r.rows === r.uniqueTriplets ? "good" : "bad"} />
-        <Kpi label="基準間取り A の種類" value={r.uniqueAnchors.toLocaleString()} sub="anchor_id の異なり数" />
-        <Kpi label="画像ファイル" value={r.imagesExpected.toLocaleString()} sub={`検証済み ${r.imagesChecked.toLocaleString()} 枚`} />
-        <Kpi label="欠損・破損" value={defects.length} sub={`出題対象から除外中 ${s.excluded.length} 問`} tone={defects.length ? "warn" : "good"} />
+      <div className="rounded-xl border border-brand-100 bg-brand-50 px-4 py-3 text-sm leading-relaxed text-[#1f3d85]">
+        ご提供いただいた実データ（<code className="font-mono">triplets.csv</code>・<code className="font-mono">triplets.json</code>・画像 9,000 枚）を取り込んでいます。
+        画像に問題のある問題は取り込み時に自動で検出し、出題対象から除外しています。差し替え画像をいただいた場合は、取り込みスクリプトを再実行するだけで反映されます。
       </div>
 
-      <div className="grid gap-5 xl:grid-cols-[1fr_1fr]">
-        <Section title="取込結果" desc={`最終検証: ${fmt(r.at)}（${r.mode === "full" ? "全数検査" : r.mode === "sample" ? "サンプル検査" : "初回取込時の全数検査"}）`}>
-          <table className="tbl">
-            <thead>
-              <tr>
-                <th>条件</th>
-                <th className="text-right">問題数</th>
-                <th className="text-right">構成比</th>
-                <th className="text-right">目標比率</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {CONDITIONS.map((c: Condition) => {
-                const share = r.byCondition[c] / r.rows;
-                const target = CONDITION_WEIGHTS[c] / total;
-                const ok = Math.abs(share - target) < 0.005;
-                return (
-                  <tr key={c}>
-                    <td className="font-bold">{c}</td>
-                    <td className="num text-right">{r.byCondition[c].toLocaleString()}</td>
-                    <td className="num text-right">{(share * 100).toFixed(1)}%</td>
-                    <td className="num text-right text-muted">{(target * 100).toFixed(0)}%</td>
-                    <td className="text-right">{ok ? <IconCheck size={14} className="ml-auto text-good" /> : <IconAlert size={14} className="ml-auto text-warn" />}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+        <Kpi label="問題データ（CSV）" value={r.rows.toLocaleString()} sub={`重複なし ${r.uniqueTriplets.toLocaleString()} 件`} tone={r.rows === r.uniqueTriplets ? "good" : "bad"} />
+        <Kpi label="補助データ（JSON）" value={(r.jsonRecords ?? 0).toLocaleString()} sub={`CSV との不一致 ${r.jsonMismatch ?? 0} 件`} tone={(r.jsonMismatch ?? 0) === 0 ? "good" : "bad"} />
+        <Kpi label="基準間取り A" value={r.uniqueAnchors.toLocaleString()} sub="各 10 組（a×2・b・c・d×2・e・f・g×2）" />
+        <Kpi label="正常な画像" value={okImages.toLocaleString()} sub={`/ ${r.imagesExpected.toLocaleString()} 枚（256×256 PNG）`} />
+        <Kpi label="画像に問題のある問題" value={`${byTriplet.length} 組`} sub={`0 バイト ${(r.empty ?? []).length} 枚 · 除外中 ${s.excluded.length} 組`} tone={byTriplet.length ? "warn" : "good"} />
+      </div>
+
+      <div className="grid gap-5 xl:grid-cols-[1.05fr_1fr]">
+        <Section title="条件別の構成と出題対象" desc={`最終検証: ${fmt(r.at)}（${r.mode === "full" ? "全数検査" : r.mode === "sample" ? "サンプル検査" : "取り込み時の全数検査"}）。条件の意味は triplets.json の b_source / c_source から判定しています。`}>
+          <div className="overflow-x-auto">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>条件</th>
+                  <th>B / C の抽出元</th>
+                  <th className="text-right">問題数</th>
+                  <th className="text-right">構成比</th>
+                  <th className="text-right">除外</th>
+                  <th className="text-right">出題対象</th>
+                </tr>
+              </thead>
+              <tbody>
+                {CONDITIONS.map((c: Condition) => {
+                  const share = r.byCondition[c] / r.rows;
+                  const ok = Math.abs(share - CONDITION_WEIGHTS[c] / total) < 0.005;
+                  return (
+                    <tr key={c}>
+                      <td className="font-bold">{c}</td>
+                      <td className="whitespace-nowrap text-xs text-ink-2">{CONDITION_INFO[c].label}</td>
+                      <td className="num text-right">{r.byCondition[c].toLocaleString()}</td>
+                      <td className="num text-right">
+                        <span className="inline-flex items-center gap-1">
+                          {(share * 100).toFixed(0)}%{ok ? <IconCheck size={12} className="text-good" /> : <IconAlert size={12} className="text-warn" />}
+                        </span>
+                      </td>
+                      <td className="num text-right text-warn">{exByCond[c] || ""}</td>
+                      <td className="num text-right font-semibold">{(r.byCondition[c] - exByCond[c]).toLocaleString()}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
           <p className="mt-3 text-xs leading-relaxed text-muted">
-            triplet_id（例: <code>10015_a_1</code>）から条件 a〜g を自動判定しています。各問題フォルダ <code>{"RPLAN_triplets/{triplet_id}/"}</code> に a.png・b.png・c.png
-            が揃っているかを確認します。
+            比率 2:1:1:2:1:1:2 と完全に一致しています。除外は各条件にほぼ均等に分散しているため、残りの問題でも条件比率を保ったまま割り当てられます。
           </p>
         </Section>
 
         <Section
-          title="画像の欠損・破損"
-          desc="検出された問題は出題対象から除外され、参加者には出題されません。"
+          title="画像に問題のある問題"
+          desc="0 バイト（中身が空）の画像を含む問題です。参加者には出題されません。"
           right={
-            defects.some((d) => !ex.has(d.triplet_id)) && (
-              <button className="btn btn-primary btn-sm" onClick={excludeAll}>
-                すべて除外
-              </button>
-            )
+            <div className="flex flex-wrap gap-2">
+              {byTriplet.some(([id]) => !ex.has(id)) && (
+                <button className="btn btn-primary btn-sm" onClick={excludeAll}>
+                  すべて除外
+                </button>
+              )}
+              {defects.length > 0 && (
+                <button className="btn btn-secondary btn-sm" onClick={() => download(`image_issues_${stamp()}.csv`, defectsCsv(defects))}>
+                  <IconDownload size={14} /> 一覧 CSV
+                </button>
+              )}
+            </div>
           }
         >
-          {defects.length === 0 ? (
+          {byTriplet.length === 0 ? (
             <p className="flex items-center gap-2 py-6 text-sm text-good">
-              <IconCheck /> 欠損・破損はありません
+              <IconCheck /> 問題のある画像はありません
             </p>
           ) : (
-            <table className="tbl">
-              <thead>
-                <tr>
-                  <th>triplet_id</th>
-                  <th>ファイル</th>
-                  <th>種類</th>
-                  <th>出題</th>
-                </tr>
-              </thead>
-              <tbody>
-                {defects.map((d) => (
-                  <tr key={d.triplet_id + d.file}>
-                    <td className="font-mono text-xs">{d.triplet_id}</td>
-                    <td className="font-mono text-xs">{d.file}</td>
-                    <td>
-                      <span className="pill bg-bad-50 text-bad">{d.kind}</span>
-                    </td>
-                    <td>
-                      <label className="flex items-center gap-2 text-xs">
-                        <input type="checkbox" checked={ex.has(d.triplet_id)} onChange={(e) => setExcluded(d.triplet_id, e.target.checked)} />
-                        除外する
-                      </label>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <>
+              <div className="mb-3 rounded-lg bg-warn-50 px-3 py-2 text-xs leading-relaxed text-warn">
+                フォルダ名の並び順で <code className="font-mono">7389_g_1/c.png</code> 以降に集中しています（ZIP 内でも 0 バイト）。画像の書き出し・コピーが途中で止まった可能性があります。
+              </div>
+              <div className="max-h-[340px] overflow-auto rounded-lg border border-line">
+                <table className="tbl">
+                  <thead>
+                    <tr>
+                      <th>triplet_id</th>
+                      <th>問題のある画像</th>
+                      <th>種類</th>
+                      <th>出題</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {byTriplet.map(([id, d]) => (
+                      <tr key={id}>
+                        <td className="font-mono text-xs">{id}</td>
+                        <td className="font-mono text-xs">{d.files.join(" · ")}</td>
+                        <td>
+                          <span className="pill bg-bad-50 text-bad">{KIND_JA[d.kind]}</span>
+                        </td>
+                        <td>
+                          <label className="flex items-center gap-2 text-xs">
+                            <input type="checkbox" checked={ex.has(id)} onChange={(e) => setExcluded(id, e.target.checked)} />
+                            除外
+                          </label>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
           <div className="mt-4 rounded-xl bg-[#f8f9fb] p-3">
-            <p className="mb-2 text-xs font-semibold text-ink-2">画像を再検証（実際にダウンロードして画像として読み込めるかを確認）</p>
+            <p className="mb-2 text-xs font-semibold text-ink-2">画像を再検証（実際にダウンロードし、画像として読み込めるかを確認）</p>
             {running ? (
               <div>
                 <div className="h-2 overflow-hidden rounded-full bg-[#e5e8ee]">
@@ -421,7 +468,7 @@ export function DataCheckPanel({ s }: { s: DemoState }) {
                 </div>
                 <p className="num mt-1.5 flex justify-between text-xs text-muted">
                   <span>
-                    {running.done.toLocaleString()} / {running.total.toLocaleString()} 枚（異常 {running.bad}）
+                    {running.done.toLocaleString()} / {running.total.toLocaleString()} 枚（問題あり {running.bad}）
                   </span>
                   <button className="font-semibold text-bad" onClick={() => (cancel.current = true)}>
                     中止
@@ -431,7 +478,7 @@ export function DataCheckPanel({ s }: { s: DemoState }) {
             ) : (
               <div className="flex flex-wrap gap-2">
                 <button className="btn btn-secondary btn-sm" onClick={() => run("sample")}>
-                  サンプル検査（約 300 枚）
+                  サンプル検査（約 340 枚）
                 </button>
                 <button className="btn btn-secondary btn-sm" onClick={() => run("full")}>
                   全数検査（9,000 枚）
@@ -442,25 +489,20 @@ export function DataCheckPanel({ s }: { s: DemoState }) {
         </Section>
       </div>
 
-      <Section title="問題データ CSV の事前チェック" desc="納品前・差し替え前に、CSV の形式（4 列）、ID の重複、条件の判定、A/B/C の対応関係を確認できます。ファイルはブラウザ内で検査され、送信されません。">
-        <div className="flex flex-wrap items-center gap-3">
-          <label className="btn btn-secondary btn-sm cursor-pointer">
-            <IconFile size={15} /> CSV ファイルを選択
-            <input
-              type="file"
-              accept=".csv,text/csv"
-              className="hidden"
-              onChange={async (e) => {
-                const file = e.target.files?.[0];
-                if (file) setCsv(validateCsv(file.name, await file.text()));
-                e.target.value = "";
-              }}
-            />
-          </label>
-          <a href="/api/triplets.csv" className="text-sm font-semibold text-brand hover:underline">
-            デモ用の問題データ CSV をダウンロード
-          </a>
-        </div>
+      <Section title="問題データ CSV の事前チェック" desc="差し替え前の CSV について、形式（4 列）、ID の重複、条件の判定、A/B/C の対応関係を確認できます。ファイルはブラウザ内で検査され、どこにも送信されません。">
+        <label className="btn btn-secondary btn-sm cursor-pointer">
+          <IconFile size={15} /> CSV ファイルを選択
+          <input
+            type="file"
+            accept=".csv,text/csv"
+            className="hidden"
+            onChange={async (e) => {
+              const file = e.target.files?.[0];
+              if (file) setCsv(validateCsv(file.name, await file.text()));
+              e.target.value = "";
+            }}
+          />
+        </label>
         {csv && (
           <div className="mt-4 rounded-xl border border-line p-4">
             <div className="flex flex-wrap items-center gap-3">
@@ -489,6 +531,7 @@ export function DataCheckPanel({ s }: { s: DemoState }) {
   );
 }
 
+
 /* ═════════════ Export ═════════════ */
 export function ExportPanel({ s }: { s: DemoState }) {
   const a = useMemo(() => audit(s), [s]);
@@ -513,19 +556,19 @@ export function ExportPanel({ s }: { s: DemoState }) {
     },
     {
       t: "本試行のみ（分析用）",
-      d: "本試行の回答のみ。triplet_id と Prolific ID で紐付け済み。左右位置・選択画像 ID・回答時間を含みます。",
+      d: "本試行の回答のみ。triplet_id と Prolific ID で紐付け済み。左右位置・選択画像 ID・回答時間に加え、triplets.json の補助データ（抽出元・距離・順位）を列として含みます。",
       n: `${counts.main.toLocaleString()} 行`,
       f: () => download(`main_trials_${stamp()}.csv`, responsesCsv(s, (r) => r.phase === "main")),
     },
     {
       t: "参加者サマリー",
-      d: "参加者 1 人 = 1 行。完了状況、離脱回数と理由、理解度・注意力確認の合否、事後質問・属性質問の回答。",
+      d: "参加者 1 人 = 1 行。終了の種類（完了／取消／中断）と理由、離脱回数、理解度・注意力確認の合否、事後質問・属性質問の回答。",
       n: `${a.participants.toLocaleString()} 行`,
       f: () => download(`participants_${stamp()}.csv`, participantsCsv(s)),
     },
     {
       t: "問題別の回答状況",
-      d: "3,000 問それぞれの回答数・予約中の数・除外状態。収集の偏りの確認に。",
+      d: "全問題それぞれの回答数・予約中の数・除外状態・画像の問題・補助データ。収集の偏りの確認に。",
       n: "3,000 行",
       f: () => download(`triplet_status_${stamp()}.csv`, tripletStatusCsv(s)),
     },
@@ -573,7 +616,7 @@ export function ExportPanel({ s }: { s: DemoState }) {
             <table className="tbl">
               <thead>
                 <tr>
-                  {["prolific_pid", "seq", "triplet_id", "condition", "b_side", "left_image_id", "right_image_id", "response", "selected_role", "selected_image_id", "rt_ms", "answered_at"].map((h) => (
+                  {["prolific_pid", "seq", "triplet_id", "condition", "b_source", "c_source", "b_side", "left_image_id", "right_image_id", "response", "selected_role", "selected_image_id", "rt_ms"].map((h) => (
                     <th key={h} className="font-mono normal-case!">
                       {h}
                     </th>
@@ -587,6 +630,8 @@ export function ExportPanel({ s }: { s: DemoState }) {
                     <td>{r.seq}</td>
                     <td>{r.triplet_id}</td>
                     <td>{r.condition}</td>
+                    <td>{r.triplet_id ? getTriplet(r.triplet_id)?.meta?.b_source : ""}</td>
+                    <td>{r.triplet_id ? getTriplet(r.triplet_id)?.meta?.c_source : ""}</td>
                     <td>{r.b_side}</td>
                     <td>{r.left_image_id}</td>
                     <td>{r.right_image_id}</td>
@@ -594,7 +639,6 @@ export function ExportPanel({ s }: { s: DemoState }) {
                     <td>{r.selected_role}</td>
                     <td>{r.selected_image_id}</td>
                     <td>{r.rt_ms}</td>
-                    <td className="whitespace-nowrap">{r.answered_at}</td>
                   </tr>
                 ))}
               </tbody>

@@ -192,9 +192,10 @@ export function StatusPill({ status }: { status: string }) {
   const m: Record<string, [string, string]> = {
     active: ["回答中", "bg-brand-50 text-brand"],
     completed: ["完了", "bg-good-50 text-good"],
-    dropped: ["途中離脱", "bg-warn-50 text-warn"],
-    declined: ["不同意", "bg-[#eef0f4] text-ink-2"],
-    screened_out: ["理解度で終了", "bg-bad-50 text-bad"],
+    dropped: ["中断（離脱）", "bg-warn-50 text-warn"],
+    declined: ["取消・不同意", "bg-[#eef0f4] text-ink-2"],
+    screened_out: ["取消・理解度", "bg-bad-50 text-bad"],
+    withdrawn: ["取消・本人", "bg-bad-50 text-bad"],
   };
   const [label, cls] = m[status] ?? [status, "bg-[#eef0f4] text-ink-2"];
   return <span className={`pill ${cls}`}>{label}</span>;

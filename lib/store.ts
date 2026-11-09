@@ -7,8 +7,8 @@ import { useSyncExternalStore } from "react";
 import { initialState, sweep } from "./engine";
 import type { DemoState } from "./types";
 
-const KEY = "fpsurvey-demo:v3";
-const REV = "fpsurvey-demo:v3:rev";
+const KEY = "fpsurvey-demo:v4";
+const REV = "fpsurvey-demo:v4:rev";
 const LOCK = "fpsurvey-demo-lock";
 
 let mem: DemoState | null = null;
@@ -31,7 +31,7 @@ function load(): DemoState {
     const raw = localStorage.getItem(KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DemoState;
-      if (parsed?.schema === 3) next = parsed;
+      if (parsed?.schema === 4) next = parsed;
     }
   } catch {
     next = null;

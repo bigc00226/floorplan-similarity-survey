@@ -4,7 +4,7 @@
  * Web Locks API). No database or external server is used.
  */
 import { allocate, attentionPositions, conditionQuota } from "./allocator";
-import { attentionTriplets, defectList, getTriplet, mainTriplets, practiceTriplets } from "./dataset";
+import { attentionTriplets, defectList, defectiveTripletIds, getTriplet, importInfo, mainTriplets, practiceTriplets } from "./dataset";
 import { shuffle, uid } from "./rng";
 import {
   CONDITIONS,
@@ -22,6 +22,7 @@ import {
   type Side,
   type Slot,
   type Stage,
+  type Termination,
   type Triplet,
 } from "./types";
 
@@ -75,8 +76,12 @@ export function initialImportReport(): ImportReport {
     imagesExpected: main.length * 3,
     imagesChecked: main.length * 3,
     missing: defects.filter((d) => d.kind === "missing").map(({ triplet_id, file }) => ({ triplet_id, file })),
-    corrupt: defects.filter((d) => d.kind === "corrupt").map(({ triplet_id, file }) => ({ triplet_id, file })),
-    csvIssues: [],
+    empty: defects.filter((d) => d.kind === "empty").map(({ triplet_id, file }) => ({ triplet_id, file })),
+    corrupt: defects.filter((d) => d.kind === "invalid").map(({ triplet_id, file }) => ({ triplet_id, file })),
+    defectiveTriplets: defectiveTripletIds().length,
+    jsonRecords: importInfo.source.jsonRecords,
+    jsonMismatch: importInfo.jsonMismatch,
+    csvIssues: importInfo.csvIssues,
     byCondition,
     uniqueAnchors: new Set(main.map((t) => t.anchor_id)).size,
     mode: "initial",
@@ -85,17 +90,24 @@ export function initialImportReport(): ImportReport {
 
 export function initialState(): DemoState {
   const report = initialImportReport();
+  const bad = defectiveTripletIds();
   return {
-    schema: 3,
+    schema: 4,
     createdAt: nowIso(),
     settings: { ...DEFAULT_SETTINGS },
     participants: {},
     responses: [],
     completedCounts: {},
-    excluded: [...report.missing, ...report.corrupt].map((d) => d.triplet_id),
+    excluded: bad,
     importReport: report,
     imageErrors: [],
-    events: [{ at: nowIso(), type: "admin", message: "問題データ 3,000 組を取り込み、画像 9,000 枚を検証しました（欠損・破損 3 件を出題対象から除外）" }],
+    events: [
+      {
+        at: nowIso(),
+        type: "admin",
+        message: `ご提供データを取り込みました: 問題 ${report.rows.toLocaleString()} 組・画像 ${report.imagesExpected.toLocaleString()} 枚を検査し、0 バイトの画像 ${report.empty.length} 枚を含む ${bad.length} 組を出題対象から除外`,
+      },
+    ],
   };
 }
 
@@ -176,8 +188,8 @@ export function sweep(s: DemoState, now = Date.now()) {
   }
 }
 
-export function dropOut(s: DemoState, p: Participant, reason: Dropout["reason"]) {
-  if (p.status !== "active") return 0;
+/** 未回答の予約をすべて解放し、他の参加者へ再割当できる状態にする */
+function releaseSlots(p: Participant) {
   let released = 0;
   for (const sl of p.slots) {
     if (sl.kind === "main" && sl.state === "reserved" && sl.triplet_id) {
@@ -187,6 +199,12 @@ export function dropOut(s: DemoState, p: Participant, reason: Dropout["reason"])
       released++;
     }
   }
+  return released;
+}
+
+export function dropOut(s: DemoState, p: Participant, reason: Dropout["reason"]) {
+  if (p.status !== "active") return 0;
+  const released = releaseSlots(p);
   p.status = "dropped";
   p.dropouts.push({ at: nowIso(), reason, stage: p.stage, answeredMain: answeredMain(p), released });
   const label = { back_button: "ブラウザの戻る操作", tab_closed: "タブ/ブラウザを閉じた", timeout: `${s.settings.leaseMinutes}分間応答なし`, manual: "管理者操作" }[reason];
@@ -196,7 +214,7 @@ export function dropOut(s: DemoState, p: Participant, reason: Dropout["reason"])
 
 export type EnterResult =
   | { ok: true; pid: string; resumed: boolean }
-  | { ok: false; reason: "already_completed" | "screened_out" | "paused"; completionUrl?: string };
+  | { ok: false; reason: "already_completed" | "screened_out" | "paused" | "withdrawn" | "declined"; completionUrl?: string };
 
 export function enter(s: DemoState, ids: { pid: string; studyId: string; sessionId: string }, simulated = false): EnterResult {
   const existing = s.participants[ids.pid];
@@ -211,8 +229,9 @@ export function enter(s: DemoState, ids: { pid: string; studyId: string; session
     existing.sessionId = ids.sessionId;
     existing.accessCount++;
     existing.lastSeenAt = at;
+    // 明示的に取り消した参加者（不同意・参加取消）は、再アクセス時にまず取消済みであることを表示する
+    if (existing.status === "withdrawn" || existing.status === "declined") return { ok: false, reason: existing.status };
     const wasDropped = existing.status !== "active";
-    if (existing.status === "declined") existing.stage = "consent";
     existing.status = "active";
     if (existing.stage === "main") reallocate(s, existing);
     if (wasDropped) log(s, "resume", `再アクセス（${existing.accessCount} 回目）: 回答済みデータを引き継いで再開`, ids.pid);
@@ -255,6 +274,49 @@ export function leave(s: DemoState, pid: string, reason: Dropout["reason"]) {
   const p = s.participants[pid];
   if (!p || p.status !== "active" || p.stage === "done") return 0;
   return dropOut(s, p, reason);
+}
+
+/** 取消済みの参加者が「続ける」を選んだ場合（未完了者の再アクセスは拒否しない） */
+export function rejoin(s: DemoState, pid: string) {
+  const p = getP(s, pid);
+  if (p.status !== "withdrawn" && p.status !== "declined") return p.stage;
+  const was = p.status;
+  if (was === "declined") p.stage = "consent";
+  p.status = "active";
+  p.lastSeenAt = nowIso();
+  if (p.stage === "main") reallocate(s, p);
+  log(s, "resume", was === "declined" ? "不同意の後、同意画面から再開" : "参加取消の後、回答済みデータを引き継いで再開", pid);
+  return p.stage;
+}
+
+/** 参加者による明示的な参加取消（通信切断・離脱とは区別して記録） */
+export function withdraw(s: DemoState, pid: string, reqId: string) {
+  const p = getP(s, pid);
+  if (hasRow(s, reqId)) return p.status;
+  requireActive(p);
+  const released = releaseSlots(p);
+  pushRow(s, baseRow(p, { id: reqId, phase: "consent", screen_id: "withdraw", item_id: "withdraw", response: "withdrawn", answered_at: nowIso() }));
+  p.status = "withdrawn";
+  p.withdrawnAt = nowIso();
+  const detail = p.stage === "main" ? `本試行 ${answeredMain(p)} 問回答済み・未回答 ${released} 問を解放` : "本試行の開始前";
+  log(s, "withdraw", `参加者が参加を取り消しました（${detail}）`, pid);
+  return p.status;
+}
+
+/** 終了の種類: 取消（明示的な終了）／中断（通信切断・離脱・タイムアウト）／完了／回答中 */
+export function terminationOf(p: Participant): Termination {
+  if (p.status === "completed") return "completed";
+  if (p.status === "declined" || p.status === "screened_out" || p.status === "withdrawn") return "cancelled";
+  if (p.status === "dropped") return "interrupted";
+  return "in_progress";
+}
+
+export function terminationReason(p: Participant): string {
+  if (p.status === "declined") return "consent_declined";
+  if (p.status === "screened_out") return "comprehension_failed";
+  if (p.status === "withdrawn") return "withdrawn_by_participant";
+  if (p.status === "dropped") return p.dropouts.at(-1)?.reason ?? "";
+  return "";
 }
 
 function baseRow(p: Participant, extra: Omit<ResponseRow, "pid" | "study_id" | "session_id" | "saved_at">): ResponseRow {
@@ -513,6 +575,7 @@ export interface Audit {
   dropped: number;
   screenedOut: number;
   declined: number;
+  withdrawn: number;
   mainResponses: number;
   reserved: number;
   poolSize: number;
@@ -596,6 +659,7 @@ export function audit(s: DemoState): Audit {
     dropped: ps.filter((p) => p.status === "dropped").length,
     screenedOut: ps.filter((p) => p.status === "screened_out").length,
     declined: ps.filter((p) => p.status === "declined").length,
+    withdrawn: ps.filter((p) => p.status === "withdrawn").length,
     mainResponses: mainTotal,
     reserved: reservedCount(s),
     poolSize: pool.length,

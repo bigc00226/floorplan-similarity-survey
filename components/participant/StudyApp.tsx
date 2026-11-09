@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { callWithRetry } from "@/lib/api";
-import { getTriplet, imagePath } from "@/lib/dataset";
+import { EXAMPLE_IMAGE, getTriplet, imagePath } from "@/lib/dataset";
 import {
   ServerError,
   answeredTotal,
@@ -18,8 +18,10 @@ import {
   logImageError,
   mainAnswer,
   practiceAnswer,
+  rejoin,
   startMain,
   submitPost,
+  withdraw,
   type PostItem,
   type TrialAnswer,
 } from "@/lib/engine";
@@ -105,7 +107,8 @@ export default function StudyApp() {
       setLeft(null);
     } else {
       setCompletionUrl(r.completionUrl ?? null);
-      setGate(r.reason);
+      // 取消済み（不同意・参加取消）は参加者データがあるため、その状態の画面を表示する
+      setGate(r.reason === "withdrawn" || r.reason === "declined" ? "ok" : r.reason);
     }
   }, [pid, studyId, sessionId]);
 
@@ -266,11 +269,35 @@ export default function StudyApp() {
         </p>
         <p className="text-sm text-muted">
           Changed your mind?{" "}
-          <button className="font-semibold text-brand underline" onClick={() => void doEnter()}>
+          <button className="font-semibold text-brand underline" onClick={() => void run((s) => rejoin(s, pid))}>
             Go back to the consent page
           </button>
         </p>
       </CenterMessage>
+    );
+
+  if (p.status === "withdrawn")
+    return (
+      <>
+      <CenterMessage title="You have withdrawn from this study">
+        <p>Thank you for your time. Your withdrawal has been recorded, and no further questions will be shown.</p>
+        <div>
+          <p>Please follow these steps:</p>
+          <ol className="mt-1 list-decimal space-y-1 pl-6">
+            <li>Close this survey tab.</li>
+            <li>Return to the Prolific website.</li>
+            <li>Click “Stop Without Completing” (or “Cancel participation”) to return your submission.</li>
+          </ol>
+        </div>
+        <p className="text-sm text-muted">
+          Withdrew by mistake?{" "}
+          <button className="font-semibold text-brand underline" onClick={() => void run((s) => rejoin(s, pid))}>
+            Continue the study
+          </button>
+        </p>
+      </CenterMessage>
+      <DemoInspector p={p} state={state} />
+      </>
     );
 
   const leftReason = left ?? (p.status === "dropped" ? (p.dropouts.at(-1)?.reason ?? "timeout") : null);
@@ -306,7 +333,7 @@ export default function StudyApp() {
       body = <ConsentScreen {...save} onAnswer={(agree) => void run((s) => consent(s, pid, agree, crypto.randomUUID()))} />;
       break;
     case "howto":
-      body = <HowToScreen {...save} exampleUrl={imagePath("example", "a.png")} onNext={() => void run((s) => howtoDone(s, pid))} />;
+      body = <HowToScreen {...save} exampleUrl={EXAMPLE_IMAGE} onNext={() => void run((s) => howtoDone(s, pid))} />;
       break;
     case "comprehension":
       body = (
@@ -391,7 +418,13 @@ export default function StudyApp() {
   }
 
   return (
-    <Shell section={section} progress={progress} counter={counter} wide={wide}>
+    <Shell
+      section={section}
+      progress={progress}
+      counter={counter}
+      wide={wide}
+      onWithdraw={p.stage !== "consent" ? () => void run((s) => withdraw(s, pid, crypto.randomUUID())) : undefined}
+    >
       {body ?? <div className="card h-80 skeleton" />}
       <DemoInspector p={p} state={state} />
     </Shell>

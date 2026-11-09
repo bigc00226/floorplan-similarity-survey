@@ -1,5 +1,5 @@
 "use client";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { STUDY_TITLE } from "@/lib/content";
 import { IconAlert, IconCheck } from "@/components/icons";
 
@@ -11,13 +11,17 @@ export function Shell({
   counter,
   children,
   wide,
+  onWithdraw,
 }: {
   section?: number;
   progress?: number;
   counter?: string;
   children: ReactNode;
   wide?: boolean;
+  /** 参加者による明示的な参加取消 */
+  onWithdraw?: () => void;
 }) {
+  const [confirming, setConfirming] = useState(false);
   return (
     <div lang="en" className="min-h-dvh flex flex-col">
       <header className="sticky top-0 z-30 border-b border-line bg-white/90 backdrop-blur">
@@ -27,7 +31,7 @@ export function Shell({
             <span className="truncate text-[15px] font-semibold tracking-tight">{STUDY_TITLE}</span>
           </div>
           {section !== undefined && (
-            <ol className="ml-auto hidden items-center gap-1 text-xs md:flex" aria-label="Study sections">
+            <ol className="ml-auto hidden items-center gap-1 text-xs lg:flex" aria-label="Study sections">
               {SECTIONS.map((s, i) => (
                 <li key={s} className="flex items-center gap-1">
                   <span
@@ -42,7 +46,16 @@ export function Shell({
               ))}
             </ol>
           )}
-          {counter && <span className="num ml-auto text-sm font-semibold text-ink-2 md:ml-4">{counter}</span>}
+          {counter && <span className="num ml-auto text-sm font-semibold text-ink-2 lg:ml-4">{counter}</span>}
+          {onWithdraw && (
+            <button
+              type="button"
+              onClick={() => setConfirming(true)}
+              className={`${counter ? "" : "ml-auto lg:ml-3"} rounded-lg px-2.5 py-1.5 text-xs font-semibold text-muted transition hover:bg-[#eef0f4] hover:text-ink`}
+            >
+              Withdraw
+            </button>
+          )}
         </div>
         {progress !== undefined && (
           <div className="h-1 w-full bg-[#eceef2]" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress * 100)}>
@@ -51,6 +64,30 @@ export function Shell({
         )}
       </header>
       <main className={`mx-auto w-full flex-1 px-4 py-5 sm:py-8 ${wide ? "max-w-[1280px]" : "max-w-[860px]"}`}>{children}</main>
+      {confirming && onWithdraw && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-[#0d1117]/50 px-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="wd-title">
+          <div className="card fade-up w-full max-w-[460px] p-6">
+            <h2 id="wd-title" className="text-lg font-bold">Withdraw from this study?</h2>
+            <p className="mt-3 text-[15px] leading-relaxed text-ink-2">
+              If you withdraw, no further questions will be shown and you will not be able to complete the study. Please then return your submission on Prolific.
+            </p>
+            <div className="mt-6 flex flex-wrap justify-end gap-2">
+              <button className="btn btn-secondary" onClick={() => setConfirming(false)} autoFocus>
+                Keep participating
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={() => {
+                  setConfirming(false);
+                  onWithdraw();
+                }}
+              >
+                Withdraw
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -2,6 +2,7 @@
 import { allocate, conditionQuota } from "./allocator";
 import { ASPECTS, DEMOGRAPHICS, DIFFICULTY } from "./content";
 import { getTriplet, mainTriplets } from "./dataset";
+import type { Triplet } from "./types";
 import {
   COMPREHENSION_CORRECT,
   comprehension,
@@ -29,10 +30,13 @@ export interface AlgoParams {
   concurrency: number;
   dropoutRate: number;
   seed: number;
+  /** 出題対象（画像不良で除外した問題を除く）。省略時は全問題 */
+  pool?: Triplet[];
 }
 
 export interface AlgoResult {
-  params: AlgoParams;
+  params: Omit<AlgoParams, "pool">;
+  poolSize: number;
   started: number;
   completed: number;
   dropped: number;
@@ -56,7 +60,7 @@ export interface AlgoResult {
 export async function simulateAllocation(params: AlgoParams, onProgress?: (p: number) => void): Promise<AlgoResult> {
   const t0 = performance.now();
   const rng = mulberry32(params.seed);
-  const pool = mainTriplets();
+  const pool = params.pool ?? mainTriplets();
   const completedCounts = new Map<string, number>();
   const load = new Map<string, number>();
   const inc = (m: Map<string, number>, k: string, d: number) => m.set(k, (m.get(k) ?? 0) + d);
@@ -150,8 +154,11 @@ export async function simulateAllocation(params: AlgoParams, onProgress?: (p: nu
   for (const c of counts) hist.set(c, (hist.get(c) ?? 0) + 1);
   const shareTotal = Object.values(shareCount).reduce((a, b) => a + b, 0) || 1;
 
+  const { pool: _omit, ...plain } = params;
+  void _omit;
   return {
-    params,
+    params: plain,
+    poolSize: pool.length,
     started,
     completed,
     dropped,

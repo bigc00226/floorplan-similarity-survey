@@ -1,8 +1,8 @@
 "use client";
 import { Fragment, useMemo, useState } from "react";
 import { SCREEN_LABELS } from "@/lib/content";
-import { getTriplet, imagePath, mainTriplets } from "@/lib/dataset";
-import { answeredMain, audit, dropOut, effectiveLoad, log } from "@/lib/engine";
+import { CONDITION_INFO, getTriplet, imagePath, mainTriplets } from "@/lib/dataset";
+import { answeredMain, audit, dropOut, effectiveLoad, log, terminationOf } from "@/lib/engine";
 import { transact } from "@/lib/store";
 import { CONDITIONS, CONDITION_WEIGHTS, type DemoState, type Participant } from "@/lib/types";
 import { ZoomModal } from "@/components/participant/ZoomModal";
@@ -34,6 +34,7 @@ const EVENT_STYLE: Record<string, string> = {
   screen_out: "bg-bad-50 text-bad",
   decline: "bg-[#eef0f4] text-ink-2",
   reject: "bg-bad-50 text-bad",
+  withdraw: "bg-bad-50 text-bad",
   admin: "bg-[#111827] text-white",
 };
 const EVENT_LABEL: Record<string, string> = {
@@ -46,6 +47,7 @@ const EVENT_LABEL: Record<string, string> = {
   screen_out: "終了",
   decline: "不同意",
   reject: "再回答防止",
+  withdraw: "参加取消",
   admin: "管理",
 };
 
@@ -89,7 +91,7 @@ export function Overview({ s, go }: { s: DemoState; go: (t: "participants" | "tr
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
         <Kpi label="参加者" value={a.participants.toLocaleString()} sub={`回答中 ${a.active} 人`} />
         <Kpi label="完了" value={a.completed.toLocaleString()} sub={a.participants ? `完了率 ${((a.completed / a.participants) * 100).toFixed(0)}%` : "—"} tone="good" />
-        <Kpi label="途中離脱・終了" value={a.dropped + a.screenedOut + a.declined} sub={`離脱 ${a.dropped} / 理解度 ${a.screenedOut} / 不同意 ${a.declined}`} />
+        <Kpi label="中断 / 取消" value={`${a.dropped} / ${a.screenedOut + a.declined + a.withdrawn}`} sub={`取消の内訳: 不同意 ${a.declined}・理解度 ${a.screenedOut}・本人 ${a.withdrawn}`} />
         <Kpi label="本試行の回答数" value={a.mainResponses.toLocaleString()} sub={`予約中 ${a.reserved} 問`} />
         <Kpi
           label="問題あたり回答数"
@@ -152,7 +154,7 @@ export function Overview({ s, go }: { s: DemoState; go: (t: "participants" | "tr
             <Check ok={a.duplicateAssignments === 0} label="同一参加者への同一問題の重複出題" value={`${a.duplicateAssignments} 件`} />
             <Check ok={a.countMismatches === 0} label="回答行（CSV）と問題別集計の不一致" value={`${a.countMismatches} 件`} />
             <Check ok={a.loadMax - a.loadMin <= 1} label="問題ごとの負荷（回答＋予約）の差" value={`${a.loadMax - a.loadMin}`} />
-            <Check ok={s.excluded.length === 0 || !!s.importReport} label="画像の欠損・破損（出題対象から除外済み）" value={`${s.excluded.length} 問`} warn={s.excluded.length > 0} onClick={() => go("data")} />
+            <Check ok={s.excluded.length === 0 || !!s.importReport} label="画像に問題のある問題（0 バイト等・出題対象から除外済み）" value={`${s.excluded.length} 問`} warn={s.excluded.length > 0} onClick={() => go("data")} />
             <Check ok={s.imageErrors.filter((e) => e.source === "participant").length === 0} label="参加者側での画像読込エラー" value={`${s.imageErrors.filter((e) => e.source === "participant").length} 件`} warn onClick={() => go("logs")} />
             <Check ok label="同じ基準間取り A の繰り返し（参加者内）" value={`${a.anchorRepeats} 件`} warn={a.anchorRepeats > 0} />
           </ul>
@@ -210,9 +212,10 @@ export function ParticipantsPanel({ s }: { s: DemoState }) {
           <option value="all">すべての状態</option>
           <option value="active">回答中</option>
           <option value="completed">完了</option>
-          <option value="dropped">途中離脱</option>
-          <option value="screened_out">理解度で終了</option>
-          <option value="declined">不同意</option>
+          <option value="dropped">中断（離脱・通信切断）</option>
+          <option value="withdrawn">取消: 本人による参加取消</option>
+          <option value="screened_out">取消: 理解度確認の不合格</option>
+          <option value="declined">取消: 不同意</option>
         </select>
         <label className="flex items-center gap-2 text-sm text-ink-2">
           <input type="checkbox" checked={hideSim} onChange={(e) => setHideSim(e.target.checked)} /> 仮想参加者を除く
@@ -321,6 +324,8 @@ function ParticipantDetail({ p, rows }: { p: Participant; rows: DemoState["respo
           <dd className="break-all font-mono">{p.studyId}</dd>
           <dt className="text-muted">SESSION_ID</dt>
           <dd className="break-all font-mono">{p.sessionIds.join(", ")}</dd>
+          <dt className="text-muted">終了の種類</dt>
+          <dd>{{ completed: "完了", cancelled: "取消（明示的な終了）", interrupted: "中断（離脱・通信切断。再開可能）", in_progress: "回答中" }[terminationOf(p)]}</dd>
           <dt className="text-muted">完了日時</dt>
           <dd>{fmt(p.completedAt)}</dd>
           <dt className="text-muted">割当（条件別）</dt>
@@ -332,7 +337,7 @@ function ParticipantDetail({ p, rows }: { p: Participant; rows: DemoState["respo
             <ul className="space-y-1">
               {p.dropouts.map((d, i) => (
                 <li key={i} className="rounded-md bg-warn-50 px-2 py-1 text-warn">
-                  {fmt(d.at)} {{ back_button: "戻る操作", tab_closed: "タブを閉じた", timeout: "タイムアウト", manual: "管理者操作" }[d.reason]}（{SCREEN_LABELS[d.stage]}・回答済み{" "}
+                  中断 {fmt(d.at)} {{ back_button: "戻る操作", tab_closed: "タブを閉じた", timeout: "タイムアウト（通信切断など）", manual: "管理者操作" }[d.reason]}（{SCREEN_LABELS[d.stage]}・回答済み{" "}
                   {d.answeredMain}・解放 {d.released}）
                 </li>
               ))}
@@ -413,7 +418,7 @@ export function TripletsPanel({ s }: { s: DemoState }) {
           <option value="all">全条件</option>
           {CONDITIONS.map((c) => (
             <option key={c} value={c}>
-              条件 {c}
+              条件 {c}（{CONDITION_INFO[c].label}）
             </option>
           ))}
           <option value="excluded">除外中のみ</option>
@@ -431,6 +436,7 @@ export function TripletsPanel({ s }: { s: DemoState }) {
             <tr>
               <th>triplet_id</th>
               <th>条件</th>
+              <th>距離 B / C</th>
               <th>anchor_id (A)</th>
               <th>b_id</th>
               <th>c_id</th>
@@ -448,14 +454,19 @@ export function TripletsPanel({ s }: { s: DemoState }) {
                 <tr key={t.triplet_id}>
                   <td className="font-mono text-xs">{t.triplet_id}</td>
                   <td>
-                    <span className="grid size-6 place-items-center rounded bg-[#eef0f4] text-xs font-bold">{t.condition}</span>
+                    <span className="grid size-6 place-items-center rounded bg-[#eef0f4] text-xs font-bold" title={CONDITION_INFO[t.condition].label}>
+                      {t.condition}
+                    </span>
+                  </td>
+                  <td className="num whitespace-nowrap text-xs text-muted">
+                    {t.meta?.b_distance != null ? `${t.meta.b_distance.toFixed(2)} / ${t.meta.c_distance?.toFixed(2)}` : "—"}
                   </td>
                   <td className="font-mono text-xs">{t.anchor_id}</td>
                   <td className="font-mono text-xs">{t.b_id}</td>
                   <td className="font-mono text-xs">{t.c_id}</td>
                   <td className="num text-right font-semibold">{done}</td>
                   <td className="num text-right text-muted">{res || ""}</td>
-                  <td>{ex.has(t.triplet_id) ? <span className="pill bg-bad-50 text-bad">除外（画像不良）</span> : <span className="pill bg-good-50 text-good">出題対象</span>}</td>
+                  <td>{ex.has(t.triplet_id) ? <span className="pill bg-bad-50 text-bad">除外（0バイト画像）</span> : <span className="pill bg-good-50 text-good">出題対象</span>}</td>
                   <td>
                     <button className="text-xs font-semibold text-brand hover:underline" onClick={() => (setPreview(t.triplet_id), setZi(0))}>
                       画像を表示

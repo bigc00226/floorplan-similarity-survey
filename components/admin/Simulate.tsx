@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
-import { audit } from "@/lib/engine";
+import { audit, eligiblePool } from "@/lib/engine";
 import { runLiveSimulation, simulateAllocation, type AlgoResult, type LiveProgress } from "@/lib/sim";
 import { CONDITIONS, CONDITION_WEIGHTS, type DemoState } from "@/lib/types";
 import { IconCheck, IconFlask, IconPlay, IconUsers } from "@/components/icons";
@@ -31,6 +31,16 @@ function NumField({ label, value, onChange, min, max, step = 1, suffix }: { labe
 
 const TOTAL_W = CONDITIONS.reduce((a, c) => a + CONDITION_WEIGHTS[c], 0);
 
+/** 隣り合う 2 つの回答数（差 1 以内）に収まった問題数が最大になる帯 */
+function bandOf(res: AlgoResult) {
+  let best = { lo: 0, n: 0 };
+  for (const h of res.histogram) {
+    const n = h.count + (res.histogram.find((x) => x.level === h.level + 1)?.count ?? 0);
+    if (n > best.n) best = { lo: h.level, n };
+  }
+  return best;
+}
+
 /* live run survives tab switches inside the admin page */
 const liveCtl: { stop: null | (() => void); last: LiveProgress | null; total: number; subs: Set<(p: LiveProgress) => void> } = { stop: null, last: null, total: 0, subs: new Set() };
 
@@ -44,7 +54,7 @@ export function SimulatePanel({ s }: { s: DemoState }) {
     setProgress(0);
     setRes(null);
     const r = await simulateAllocation(
-      { participants: ap.participants, n: ap.n, concurrency: ap.concurrency, dropoutRate: ap.dropout / 100, seed: (Date.now() & 0xffff) + 1 },
+      { participants: ap.participants, n: ap.n, concurrency: ap.concurrency, dropoutRate: ap.dropout / 100, seed: (Date.now() & 0xffff) + 1, pool: eligiblePool(s) },
       (p) => setProgress(p),
     );
     setRes(r);
@@ -98,7 +108,7 @@ export function SimulatePanel({ s }: { s: DemoState }) {
           </button>
         </div>
         <p className="mt-2 text-xs text-muted">
-          参考: 3,000 問すべてに 1 回ずつ回答が集まるのは、完了者 約 <b className="num">{perRound}</b> 人ごと（N={ap.n}）。参加者 {ap.participants} 人では 1 問あたり 約{" "}
+          参考: 出題対象 {a.poolSize.toLocaleString()} 問（画像不良の {s.excluded.length} 問を除外済み）すべてに 1 回ずつ回答が集まるのは、完了者 約 <b className="num">{perRound}</b> 人ごと（N={ap.n}）。参加者 {ap.participants} 人では 1 問あたり 約{" "}
           <b className="num">{((ap.participants * (1 - ap.dropout / 100) * ap.n) / a.poolSize).toFixed(1)}</b> 回答（離脱者の回答済み分を除く概算）。
         </p>
 
@@ -114,11 +124,12 @@ export function SimulatePanel({ s }: { s: DemoState }) {
             </div>
             <div className="grid gap-5 xl:grid-cols-2">
               <div>
-                <p className="mb-2 text-sm font-semibold">最終的な回答数の分布（3,000 問）</p>
+                <p className="mb-2 text-sm font-semibold">最終的な回答数の分布（出題対象 {res.poolSize.toLocaleString()} 問）</p>
                 <Histogram data={res.histogram} />
                 <p className="mt-2 text-xs leading-relaxed text-muted">
-                  最多の値に揃った問題: <b className="num text-ink">{Math.max(...res.histogram.map((h) => h.count)).toLocaleString()}</b> 問（
-                  {((Math.max(...res.histogram.map((h) => h.count)) / 3000) * 100).toFixed(1)}%）。端の数問は、調査終盤に離脱した参加者の未回答分が解放されたもので、追加募集で埋まります。
+                  回答数が <b className="num text-ink">{bandOf(res).lo}〜{bandOf(res).lo + 1} 件</b>（差 1 以内）に収まった問題:{" "}
+                  <b className="num text-ink">{bandOf(res).n.toLocaleString()}</b> 問（{((bandOf(res).n / res.poolSize) * 100).toFixed(1)}%）。平均が {res.mean.toFixed(2)}{" "}
+                  件のため、2 つの値に分かれるのは均等化が働いている状態です。範囲外のごく少数は、調査終盤に離脱した参加者の未回答分が解放されたもので、追加募集で埋まります。
                 </p>
               </div>
               <div>
@@ -143,7 +154,7 @@ export function SimulatePanel({ s }: { s: DemoState }) {
               </p>
               <p className="mt-1">
                 参加者 {res.started} 人（離脱 {res.dropped} 人）を同時 {res.params.concurrency} 人で処理し、回答中も含めた各問題の負荷の差は最大 {res.maxSpreadAfterWarmup}
-                に保たれました。条件別の出題割合は目標比率と ±{(Math.max(...CONDITIONS.map((c) => Math.abs(res.conditionShare[c] - CONDITION_WEIGHTS[c] / TOTAL_W))) * 100).toFixed(2)}
+                に保たれ、最終的に出題対象 {res.poolSize.toLocaleString()} 問の {((bandOf(res).n / res.poolSize) * 100).toFixed(1)}% が回答数の差 1 以内に収まりました。条件別の出題割合は目標比率と ±{(Math.max(...CONDITIONS.map((c) => Math.abs(res.conditionShare[c] - CONDITION_WEIGHTS[c] / TOTAL_W))) * 100).toFixed(2)}
                 ポイント以内、同一参加者への重複出題は {res.duplicates} 件です。
               </p>
             </div>
